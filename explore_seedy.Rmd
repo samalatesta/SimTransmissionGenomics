@@ -1,0 +1,159 @@
+---
+title: 'SEEDY Exploration'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(seedy)
+library(dplyr)
+```
+
+## Simulation Parameters (SIR with Admissions & Discharges)
+| Parameter | Default Value | Description |
+| :--- | :--- | :--- |
+| **beta** | `0.002` | **Infection rate:** Probability of transmission per $S$-$I$ contact. |
+| **gamma** | `0.001` | **Recovery rate:** Rate at which infected individuals recover ($1/duration$). |
+| **delta** | `0.001` | **Turnover rate:** Rate of population replacement (births/deaths). |
+| **N** | `50` | **Population size:** Total number of individuals in the simulation. |
+| **tmax** | `5000` | **Time horizon:** The maximum duration of the simulation. |
+| **seed** | `1` | **Random seed:** Ensures the simulation results are reproducible. |
+---
+
+
+## Output Format
+
+| Column Name | Type | Description |
+| :--- | :--- | :--- |
+| **inf.ID** | `integer` | Unique ID of the infected individual. |
+| **inf.times** | `numeric` | Time ($t$) at which the individual was infected. |
+| **rec.times** | `numeric` | Time ($t$) at which the individual recovered or was removed. |
+| **inf.source** | `integer` | The ID of the person who infected them (0 = index case). |
+
+#### SIR (not SEEDY)
+```{r}
+simulate_SIR <- function(
+  beta = 0.002,
+  gamma = 0.001,
+  delta = 0.001,
+  tmax = 5000,
+  N = 50,
+  seed = 1
+) {
+  set.seed(seed)
+  
+  t <- 0
+  next_id <- 1
+  
+  S <- list()
+  I <- list()
+  all_people <- list()
+  
+  # --- Initialize population ---
+  for (i in 1:N) {
+    person <- list(id = next_id, inf_time = NULL, rec_time = NULL, source = NULL)
+    S[[length(S)+1]] <- person
+    all_people[[as.character(next_id)]] <- person
+    next_id <- next_id + 1
+  }
+  
+  # --- Seed infection ---
+  idx <- sample(seq_along(S), 1)
+  person <- S[[idx]]
+  S <- S[-idx]
+  
+  person$inf_time <- 0
+  person$source <- 0
+  person$rec_time <- rexp(1, gamma) # Recovery time
+  
+  I[[1]] <- person
+  all_people[[as.character(person$id)]] <- person
+  
+  # --- Simulation ---
+  while (t < tmax && length(I) > 0) {
+    nS <- length(S)
+    nI <- length(I)
+    
+    rate_inf <- beta * nS * nI
+    rate_turnover <- delta * (nS + nI)
+    
+    total_rate <- rate_inf + rate_turnover
+    if (total_rate <= 0) break
+    
+    dt <- rexp(1, total_rate)
+    if (t + dt > tmax) break
+    t <- t + dt
+    
+    event <- sample(c("infection", "turnover"), 1, prob = c(rate_inf, rate_turnover))
+    
+    if (event == "infection" && nS > 0) {
+      # Choose active source (recovery time must be in future)
+      active_I <- which(sapply(I, function(p) p$rec_time > (t - 1e-9)))
+      if (length(active_I) > 0) {
+        src_idx <- if(length(active_I) > 1) sample(active_I, 1) else active_I
+        rec_idx <- sample(seq_along(S), 1)
+        
+        source <- I[[src_idx]]
+        recipient <- S[[rec_idx]]
+        
+        recipient$inf_time <- t
+        recipient$source <- source$id
+        # Ensure rec_time is strictly > inf_time
+        recipient$rec_time <- t + rexp(1, gamma)
+        
+        I[[length(I)+1]] <- recipient
+        all_people[[as.character(recipient$id)]] <- recipient
+        S <- S[-rec_idx]
+      }
+    }
+    
+    if (event == "turnover") {
+      total_pop <- nS + nI
+      if (runif(1) < nI / total_pop && nI > 0) {
+        idx <- sample(seq_along(I), 1)
+        I <- I[-idx]
+      } else if (nS > 0) {
+        idx <- sample(seq_along(S), 1)
+        S <- S[-idx]
+      }
+      
+      new_person <- list(id = next_id, inf_time = NULL, rec_time = NULL, source = NULL)
+      S[[length(S)+1]] <- new_person
+      all_people[[as.character(next_id)]] <- new_person
+      next_id <- next_id + 1
+    }
+    
+    # Clean up recovered from the active infectious list
+    I <- I[sapply(I, function(p) p$rec_time > t)]
+  }
+  
+  # --- Build output: ONLY include those who were infected ---
+  infected_list <- Filter(function(p) !is.null(p$inf_time), all_people)
+  
+  df <- do.call(rbind, lapply(infected_list, function(p) {
+    data.frame(
+      inf.ID = p$id,
+      inf.times = p$inf_time,
+      rec.times = p$rec_time,
+      inf.source = p$source
+    )
+  }))
+  
+  if (is.null(df)) return(NULL)
+  
+  df <- df[order(df$inf.times), ]
+  return(df)
+}
+out <- simulate_SIR(N = 50) %>% as.data.frame()
+
+head(out)
+
+
+```
+
+```{r}
+out = simfixoutbreak(out$inf.ID,out$inf.times, out$rec.times, out$inf.source, mut.rate=0.000001, equi.pop=10000, shape=flat,
+           inoc.size=1, imp.var=25, samples.per.time=1, samp.schedule="random", 
+           samp.freq=500, full=FALSE, feedback=500, glen=100000)
+
+```
